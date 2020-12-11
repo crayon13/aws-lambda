@@ -96,8 +96,10 @@ const _fn = {
             const fields = headerLine.split(_config.fileFieldDelemeter);
             _fn.validator.fileHeader(fields);
             _config.indexFieldNames = fields;
+
+            console.log('config : ', JSON.stringify(_config));
         }, 
-        init: (event) => {
+        init: async (event) => {
             _config.s3Bucket = event.Records[0].s3.bucket.name;
             _config.s3Key = event.Records[0].s3.object.key;
         
@@ -109,9 +111,8 @@ const _fn = {
         
             _config.path = paths.slice(0, 3).join('/') + '/';
             
-            _fn.file.readS3ObjectStringAnsSetConfig(['indexMappings', 'fileFieldDelemeter'], _configFileName);
+            await _fn.file.readS3ObjectStringAndSetConfig(['indexMappings', 'fileFieldDelemeter'], _configFileName);
 
-        
             const indexInfo = _config.fileName.split('.');
             for (let seq = 0; seq < _configValues.fromFileName.length; seq++) {
                 _fn.config.setValue(_configValues.fromFileName[seq], indexInfo[seq]);
@@ -133,12 +134,12 @@ const _fn = {
                 }
             });
         }, 
-        document: (fields, document) => {
+        fileRecord: (fields, record) => {
             if (_config.indexFieldNames.length != fields.length) {
                 const errorMessage = `[makeBulkJsonAndAddQueue] fieldCount Not Equals, 
                     header : ${_config.indexFieldNames.length }, 
                     document :${fields.length}, 
-                    - ${document}`;
+                    - ${record}`;
 
                 throw new Error(errorMessage);
             }
@@ -146,42 +147,30 @@ const _fn = {
         
     },
     file: {
-        readS3ObjectStringAnsSetConfig: (keys, fileName) => {
-            console.log('[readS3ObjectStringAnsSetConfig] : ', keys.join(','), _config.path + fileName);
+        readS3ObjectStringAndSetConfig: async (keys, fileName) => {
+            console.log('[readS3ObjectStringAndSetConfig] : ', keys.join(','), _config.path + fileName);
 
             if (!_usable.s3) {
                 return;
             }
 
-            console.log('[readS3ObjectStringAnsSetConfig] : file read');
-
-            _s3.getObject(
-                {Bucket: _config.s3Bucket, Key: _config.path + fileName},
-                (error, data) => {
-                    if (!error) {
-                        try {
-                            const configByFile = JSON.parse(data.Body.toString('utf-8'));
-
-                            console.log('_s3.getObject', data.Body.toString('utf-8'));
-                            
-                            keys.forEach(key => _fn.config.setValue(key, configByFile[key]));
-                        } catch (exception) {
-                            throw new Error(error);
-                        }
-                    } else {
-                        throw new Error(`s3 file read fail - bucket: ${_config.s3Bucket}, key : ${_config.path + fileName}`);
-                    }
-                } 
-            );
+            const params = {
+                Bucket: _config.s3Bucket, 
+                Key: _config.path + fileName
+            };
+            
+            const s3Object = await _s3.getObject(params).promise();
+            const configByFile = JSON.parse(s3Object.Body.toString('utf-8'));
+            keys.forEach(key => _fn.config.setValue(key, configByFile[key]));
         }
     }, 
     indexing: {
-        makeBulkJsonAndAddQueue: (document) => {
-            const fields = document.split(_config.fileFieldDelemeter);
+        makeBulkJsonAndAddQueue: (record) => {
+            const fields = record.split(_config.fileFieldDelemeter);
         
-            _fn.validator.document(fields, document);
+            _fn.validator.fileRecord(fields, record);
         
-            const id = document[0];
+            const id = record[0];
         
             const header = {index: {_index: _config.index, _type: 'doc', _id: id}};
             const body = {};
@@ -193,15 +182,16 @@ const _fn = {
             _bulkQueue.push(header);
             _bulkQueue.push(body);
         },
-        bulk: (document) => {
-            console.log('bulkIndex, document : ', document);
+        bulk: (record) => {
+            console.log('bulkIndex, document : ', record);
+            
             _addedDocumentCount++;
         
             if (_addedDocumentCount === 1) {
-                _fn.config.setIndexFields(document);
+                _fn.config.setIndexFields(record);
             } else {
                 // document를 만들고 bulkQueue.push
-                _fn.indexing.makeBulkJsonAndAddQueue(document);
+                _fn.indexing.makeBulkJsonAndAddQueue(record);
         
                 if (_bulkQueue.isFull() || _addedDocumentCount === _totalDocumentsCount) {
                     // bulkQueue 를 처리하고 bulkQueue 초기화
@@ -397,12 +387,12 @@ const _fn = {
     }
 }
 
-exports.handler = (event, context) => {
+exports.handler = async (event, context) => {
     console.log('Received event: ', JSON.stringify(event, null, 2));
     _context = context;
 
     try {
-        _fn.config.init(event);
+        await _fn.config.init(event);
 
         if (_config.action === 'create') {
             _fn.elasticsearch.createIndex();
@@ -438,14 +428,34 @@ function readFileAndBulkIndex() {
         done();
     }    
 
-    const s3Stream = _s3.getObject({Bucket: _config.s3Bucket, Key: _config.s3Key}).createReadStream();
+    const params = {
+        Bucket: _config.s3Bucket, 
+        Key: _config.s3Key
+    };
+
+    console.log('[readFileAndBulkIndex]', JSON.stringify(params));
+
+    const s3Stream = _s3.getObject(params).createReadStream();
 
     s3Stream
-      .pipe(lineStream)
-      .pipe(documentStream)
-      .on('data', (document) => {
-        if (!_fn.indexing.bulk(document)) {
-            return;
+    .pipe(lineStream)
+    .pipe(documentStream)
+        .on('data', (record) => {
+            console.log('[readFileAndBulkIndex]', record);
+        // if (!_fn.indexing.bulk(record)) {
+        //     return;
+        // }
+
+    })
+    .on('error', () => {
+        console.log(
+        'Error getting object "' + _config.s3Key + '" from bucket "' + _config.s3Bucket + '".  ' +
+        'Make sure they exist and your bucket is in the same region as this function.');
         }
-      });
+    )
+    .on('close', () => {
+        console.log('[readFileAndBulkIndex]close');
+    });
+
+      
 }
