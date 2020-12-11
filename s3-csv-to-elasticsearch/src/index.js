@@ -9,13 +9,25 @@ const _https = require('https');
 
 let _context;
 
-const _mappingsFileName = 'mappings.json';
-const _fileFieldDelemeterFileName = 'fileFieldDelemeter.conf';
+const _configFileName = 'config.json';
 
 const _usable = {
     s3: false,
     elasticsearch: false
 }
+
+const _elasticsearch = {
+    devel: {
+        endpoint: 'my-search-endpoint.amazonaws.com'
+    }
+    , prod: {
+        endpoint: 'my-search-endpoint.amazonaws.com'
+    },
+    region: 'ap-northeast-2',
+    service: 'es',
+    doctype: '_doc'
+};
+
 
 let _totalDocumentsCount = 0;
 let _addedDocumentCount = 0;
@@ -40,13 +52,6 @@ const _bulkQueue = {
     }
 };
 
-const _esDomain = {
-    endpoint: 'my-search-endpoint.amazonaws.com',
-    region: 'ap-northeast-2',
-    service: 'es',
-    doctype: '_doc'
-};
-
 const _configValues = {
     fromS3Key: ['root', 'index', 'profile', 'fileName'],
     fromFileName: ['dataTime', 'action']
@@ -55,7 +60,8 @@ const _configValues = {
 const _config = {
     s3Bucket: '',
     s3Key: '', 
-    mappings: '',
+    indexSettings: {},
+    indexMappings: {},
     fileFieldDelemeter: '',
     indexFieldNames: [], 
     root: '',
@@ -103,8 +109,8 @@ const _fn = {
         
             _config.path = paths.slice(0, 3).join('/') + '/';
             
-            _fn.file.readS3ObjectStringAnsSetConfig('mappings', _mappingsFileName);
-            _fn.file.readS3ObjectStringAnsSetConfig('fileFieldDelemeter', _fileFieldDelemeterFileName);
+            _fn.file.readS3ObjectStringAnsSetConfig(['indexMappings', 'fileFieldDelemeter'], _configFileName);
+
         
             const indexInfo = _config.fileName.split('.');
             for (let seq = 0; seq < _configValues.fromFileName.length; seq++) {
@@ -118,10 +124,10 @@ const _fn = {
     },
     validator: {
         fileHeader: (fields) => {
-            const mapping = JSON.parse(_config.mappings);
+            const indexMappings = _config.indexMappings;
         
             fields.forEach(field => {
-                if (!mapping.mappings.properties[field]) {
+                if (!indexMappings.mappings.properties[field]) {
                     const errorMessage = `[validDataHeader] mapping field not found!, index : ${_config.index}, field: ${field}`;
                     throw new Error(errorMessage);
                 }
@@ -140,7 +146,7 @@ const _fn = {
         
     },
     file: {
-        readS3ObjectStringAnsSetConfig: (configKey, fileName) => {
+        readS3ObjectStringAnsSetConfig: (keys, fileName) => {
             if (!_usable.s3) {
                 return;
             }
@@ -149,7 +155,12 @@ const _fn = {
                 {Bucket: _config.s3Bucket, Key: _config.path + fileName},
                 (error, data) => {
                     if (!error) {
-                        _fn.config.setValue(configKey, data.Body.toString());
+                        try {
+                            const configByFile = JSON.parse(data.Body.toString('utf-8'));
+                            keys.forEach(key => _fn.config.setValue(key, configByFile[key]));
+                        } catch (exception) {
+                            throw new Error(error);
+                        }
                     } else {
                         throw new Error(`s3 file read fail - bucket: ${_config.s3Bucket}, key : ${_config.path + fileName}`);
                     }
@@ -206,13 +217,14 @@ const _fn = {
         },
         createIndex: () => {
             const indexName = _config.realIndex;
-            console.log('indexName : ', indexName, ', mappingFile : ', _mappingsFileName);
+            console.log('indexName : ', indexName, ', mappingFile : ', _configFileName);
         
             // do create index;
-            const indexConfig = JSON.parse(_config.mappings);
-            indexConfig['settings'] = {};
+            const indexScheme = {};
+            indexScheme.settings = _config.indexSettings;
+            indexScheme.mappings = _config.indexMappings;
 
-            const requestParams = _fn.httpRequest.buildRequest('PUT', _config.realIndex, JSON.stringify(indexConfig));
+            const requestParams = _fn.httpRequest.buildRequest('PUT', _config.realIndex, JSON.stringify(indexScheme));
             _fn.httpRequest.request(requestParams, _fn.httpRequest.callback);
 
         },
@@ -236,18 +248,19 @@ const _fn = {
             const datetime = (new Date()).toISOString().replace(/[:\-]|\.\d{3}/g, '');
             const date = datetime.substr(0, 8);
             const kDate = _fn.crypto.hmac('AWS4' + process.env.AWS_SECRET_ACCESS_KEY, date);
-            const kRegion = _fn.crypto.hmac(kDate, _esDomain.region);
-            const kService = _fn.crypto.hmac(kRegion, _esDomain.service);
+            const kRegion = _fn.crypto.hmac(kDate, _elasticsearch.region);
+            const kService = _fn.crypto.hmac(kRegion, _elasticsearch.service);
             const kSigning = _fn.crypto.hmac(kService, 'aws4_request');
+            const endpoint = _elasticsearch[_config.profile].endpoint
             
             const request = {
-                host: _esDomain.endpoint,
+                host: endpoint,
                 method: method,
                 path: path,
                 body: requestBody,
                 headers: { 
                     'Content-Type': 'application/json',
-                    'Host': _esDomain.endpoint,
+                    'Host': endpoint,
                     'Content-Length': Buffer.byteLength(requestBody),
                     'X-Amz-Security-Token': process.env.AWS_SESSION_TOKEN,
                     'X-Amz-Date': datetime
