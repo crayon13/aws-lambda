@@ -12,7 +12,7 @@ let _context;
 const _configFileName = 'config.json';
 
 const _usable = {
-    s3: false,
+    s3: true,
     elasticsearch: false
 }
 
@@ -147,9 +147,13 @@ const _fn = {
     },
     file: {
         readS3ObjectStringAnsSetConfig: (keys, fileName) => {
+            console.log('[readS3ObjectStringAnsSetConfig] : ', keys.join(','), _config.path + fileName);
+
             if (!_usable.s3) {
                 return;
             }
+
+            console.log('[readS3ObjectStringAnsSetConfig] : file read');
 
             _s3.getObject(
                 {Bucket: _config.s3Bucket, Key: _config.path + fileName},
@@ -157,6 +161,9 @@ const _fn = {
                     if (!error) {
                         try {
                             const configByFile = JSON.parse(data.Body.toString('utf-8'));
+
+                            console.log('_s3.getObject', data.Body.toString('utf-8'));
+                            
                             keys.forEach(key => _fn.config.setValue(key, configByFile[key]));
                         } catch (exception) {
                             throw new Error(error);
@@ -212,38 +219,36 @@ const _fn = {
     },
     elasticsearch: {
         postForBulk: () => {
-            const requestParams = _fn.httpRequest.buildRequest('POST', '/_bulk', _bulkQueue.makeRequestBody());
-            _fn.httpRequest.request(requestParams, _fn.httpRequest.callback);
+            const requestParams = _fn.elasticsearch.buildRequest('POST', '/_bulk', _bulkQueue.makeRequestBody());
+            _fn.elasticsearch.request(requestParams, _fn.elasticsearch.callback);
         },
         createIndex: () => {
             const indexName = _config.realIndex;
-            console.log('indexName : ', indexName, ', mappingFile : ', _configFileName);
+            console.log('[createIndex] indexName : ', indexName, ', mappingFile : ', _configFileName);
         
             // do create index;
             const indexScheme = {};
             indexScheme.settings = _config.indexSettings;
             indexScheme.mappings = _config.indexMappings;
 
-            const requestParams = _fn.httpRequest.buildRequest('PUT', _config.realIndex, JSON.stringify(indexScheme));
-            _fn.httpRequest.request(requestParams, _fn.httpRequest.callback);
+            const requestParams = _fn.elasticsearch.buildRequest('PUT', _config.realIndex, JSON.stringify(indexScheme));
+            _fn.elasticsearch.request(requestParams, _fn.elasticsearch.callback);
 
         },
         rebindAlias: () => {
             const aliasName = _config.index;
             const indexName = _config.realIndex;
         
-            console.log('indexName : ', indexName, ', read aliasName : ', aliasName);
+            console.log('[rebindAlias] indexName : ', indexName, ', read aliasName : ', aliasName);
 
             // do rebind alias; 
             const command = {
 
             };
 
-            const requestParams = _fn.httpRequest.buildRequest('POST', '_alias', JSON.stringify(command));
-            _fn.httpRequest.request(requestParams, _fn.httpRequest.callback);
-        }
-    },
-    httpRequest: {
+            const requestParams = _fn.elasticsearch.buildRequest('POST', '_alias', JSON.stringify(command));
+            _fn.elasticsearch.request(requestParams, _fn.elasticsearch.callback);
+        },
         buildRequest: (method, path, requestBody) => {
             const datetime = (new Date()).toISOString().replace(/[:\-]|\.\d{3}/g, '');
             const date = datetime.substr(0, 8);
@@ -285,7 +290,7 @@ const _fn = {
                 _fn.crypto.hash(request.body, 'hex'),
             ].join('\n');
         
-            const credentialString = [ date, region, service, 'aws4_request' ].join('/');
+            const credentialString = [ date, _elasticsearch.region, _elasticsearch.service, 'aws4_request' ].join('/');
         
             const stringToSign = [
                 'AWS4-HMAC-SHA256',
@@ -365,8 +370,8 @@ const _fn = {
             }));
 
             if (error) {
-                _fn.httpRequest.logFailure(error, failedItems);
-                _context.fail(JSON.stringify(error));
+                _fn.elasticsearch.logFailure(error, failedItems);
+                // _context.fail(JSON.stringify(error));
             } else {
                 console.log('Success: ' + JSON.stringify(success));
             }
@@ -378,6 +383,8 @@ const _fn = {
                 console.log("Failed Items: " +
                     JSON.stringify(failedItems, null, 2));
             }
+
+            throw new Error(error);
         }
     },
     crypto: {
@@ -404,8 +411,7 @@ exports.handler = (event, context) => {
         } else if (_config.action === 'update') {
             readFileAndBulkIndex();
         } else {
-            console.error('action is not create | update');
-            _context.fail();
+            throw new Error('action is not create | update')
         }
     } catch(error) {
         console.error(error);
