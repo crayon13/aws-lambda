@@ -9,6 +9,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "aws-sdk": "^2.809.0",
     "byline": "^5.0.0",
     "clf-parser": "0.0.2",
     "stream": "0.0.2"

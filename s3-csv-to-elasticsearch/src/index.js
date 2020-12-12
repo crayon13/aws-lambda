@@ -1,13 +1,9 @@
 const _AWS = require('aws-sdk');
 const _s3 = new _AWS.S3();
-const _path = require('path');
 const _stream = require('stream');
 const _LineStream = require('byline').LineStream;
-const _parse = require('clf-parser');  // Apache Common Log Format
 const _crypto = require('crypto');
 const _https = require('https');
-
-let _context;
 
 const _configFileName = 'config.json';
 
@@ -18,10 +14,22 @@ const _usable = {
 
 const _elasticsearch = {
     devel: {
-        endpoint: 'my-search-endpoint.amazonaws.com'
-    }
-    , prod: {
-        endpoint: 'my-search-endpoint.amazonaws.com'
+        endpoint: 'my-search-endpoint.amazonaws.com',
+        indexSettings: {
+            settings: {
+                "number_of_shards": 1,
+                "number_of_replicas": 0            
+            } 
+        }   
+    }, 
+    prod: {
+        endpoint: 'my-search-endpoint.amazonaws.com',
+        indexSettings: {
+            settings: {
+                "number_of_shards": 1,
+                "number_of_replicas": 0            
+            } 
+        }      
     },
     region: 'ap-northeast-2',
     service: 'es',
@@ -29,8 +37,8 @@ const _elasticsearch = {
 };
 
 
-let _totalDocumentsCount = 0;
-let _addedDocumentCount = 0;
+let _totalRecordsCount = 0;
+let _addedRecordsCount = 0;
 
 const _bulkQueue = {
     queue: [], 
@@ -38,6 +46,9 @@ const _bulkQueue = {
     isFull: () => {
         return _bulkQueue.maxQueuSize <= _bulkQueue.queue.length;
     }, 
+    isEmpty: () => {
+        return _bulkQueue.queue.length === 0;
+    },
     push: (jsonObject) => {
         _bulkQueue.queue.push(JSON.stringify(jsonObject));
     },
@@ -60,7 +71,6 @@ const _configValues = {
 const _config = {
     s3Bucket: '',
     s3Key: '', 
-    indexSettings: {},
     indexMappings: {},
     fileFieldDelemeter: '',
     indexFieldNames: [], 
@@ -98,8 +108,13 @@ const _fn = {
             _config.indexFieldNames = fields;
 
             console.log('config : ', JSON.stringify(_config));
-        }, 
+        },
         init: async (event) => {
+            console.log('[config init]: start');
+
+            _totalRecordsCount = 0;
+            _addedRecordsCount = 0;
+
             _config.s3Bucket = event.Records[0].s3.bucket.name;
             _config.s3Key = event.Records[0].s3.object.key;
         
@@ -111,16 +126,16 @@ const _fn = {
         
             _config.path = paths.slice(0, 3).join('/') + '/';
             
-            await _fn.file.readS3ObjectStringAndSetConfig(['indexMappings', 'fileFieldDelemeter'], _configFileName);
-
             const indexInfo = _config.fileName.split('.');
             for (let seq = 0; seq < _configValues.fromFileName.length; seq++) {
                 _fn.config.setValue(_configValues.fromFileName[seq], indexInfo[seq]);
             };
-
+        
             _fn.config.setRealIndex();
         
-            console.log('config : ', JSON.stringify(_config));
+            await _fn.file.readS3ObjectStringAndSetConfig(['indexMappings', 'fileFieldDelemeter'], _configFileName);
+
+            console.log('[config init]: end', JSON.stringify(_config));
         }
     },
     validator: {
@@ -147,9 +162,8 @@ const _fn = {
         
     },
     file: {
-        readS3ObjectStringAndSetConfig: async (keys, fileName) => {
-            console.log('[readS3ObjectStringAndSetConfig] : ', keys.join(','), _config.path + fileName);
-
+        readS3ObjectStringAndSetConfig: async (configKeys, fileName) => {
+            console.log('[readS3ObjectStringAndSetConfig] : start');
             if (!_usable.s3) {
                 return;
             }
@@ -161,7 +175,9 @@ const _fn = {
             
             const s3Object = await _s3.getObject(params).promise();
             const configByFile = JSON.parse(s3Object.Body.toString('utf-8'));
-            keys.forEach(key => _fn.config.setValue(key, configByFile[key]));
+            configKeys.forEach(key => _fn.config.setValue(key, configByFile[key]));
+
+            console.log('[readS3ObjectStringAndSetConfig] : end');
         }
     }, 
     indexing: {
@@ -175,7 +191,7 @@ const _fn = {
             const header = {index: {_index: _config.index, _type: 'doc', _id: id}};
             const body = {};
 
-            for (let fieldIndex = 0; fieldIndex < fields.lengthl; fieldIndex++) {
+            for (let fieldIndex = 0; fieldIndex < fields.length; fieldIndex++) {
                 body[_config.indexFieldNames[fieldIndex]] = fields[fieldIndex];
             }
 
@@ -183,53 +199,101 @@ const _fn = {
             _bulkQueue.push(body);
         },
         bulk: (record) => {
-            console.log('bulkIndex, document : ', record);
-            
-            _addedDocumentCount++;
+            console.log('[bulk] _totalRecordsCount :', _totalRecordsCount, ', _addedRecordsCount', _addedRecordsCount,'recored:', record);
+            _fn.indexing.makeBulkJsonAndAddQueue(record);
+    
+            if (_bulkQueue.isFull()) {
+                // bulkQueue 를 처리하고 bulkQueue 초기화
+                _fn.elasticsearch.postForBulk();
+            }
+        },
+        excuteIndexing: (context) => {
+            if (!_usable.s3) {
+                return;
+            }
+            const params = {
+                Bucket: _config.s3Bucket, 
+                Key: _config.s3Key
+            };
+
+            console.log('[readFileAndBulkIndex] start : ', JSON.stringify(params));
+
+            _fn.elasticsearch.createIndex();
         
-            if (_addedDocumentCount === 1) {
-                _fn.config.setIndexFields(record);
-            } else {
-                // document를 만들고 bulkQueue.push
-                _fn.indexing.makeBulkJsonAndAddQueue(record);
+            const lineStream = new _LineStream();
+            // A stream of log records, from parsing each log line
+            const recordStream = new _stream.Transform({objectMode: true})
+            recordStream._transform = function(line, encoding, done) {
+                this.push(line.toString());
+                done();
+            }
+               
+            const s3Stream = _s3.getObject(params).createReadStream();
         
-                if (_bulkQueue.isFull() || _addedDocumentCount === _totalDocumentsCount) {
-                    // bulkQueue 를 처리하고 bulkQueue 초기화
-                    _fn.elasticsearch.postForBulk();
-        
-                    _bulkQueue.clear();
+            // Flow: S3 file stream -> Log Line stream -> Log Record stream -> ES
+            s3Stream
+            .pipe(lineStream)
+            .pipe(recordStream)
+            .on('data', (record) => {
+                if ( _totalRecordsCount === 0 ) {
+                    _fn.config.setIndexFields(record);
+                    console.log(JSON.stringify(_config));
+                } else {
+                    _fn.indexing.bulk(record)
                 }
-            }  
-        
-            if (_addedDocumentCount === _totalDocumentsCount) {
-                // Mark lambda success.  If not done so, it will be retried.
-                console.log('All ', _addedDocumentCount, ' log records added to ES.');
-            }        
+
+                _totalRecordsCount++;
+            })
+            .on('error', () => {
+                console.error(
+                    'Error getting object', JSON.stringify(params), 
+                    'Make sure they exist and your bucket is in the same region as this function.');
+                context.fail();
+            })    
+            .on('end', () => {
+                _fn.elasticsearch.postForBulk();
+                _fn.elasticsearch.rebindAlias();
+
+                console.log('[readFileAndBulkIndex] end');
+            });
         }
     },
     elasticsearch: {
         postForBulk: () => {
+            if (_bulkQueue.isEmpty()) {
+                return;
+            }
+
             const requestParams = _fn.elasticsearch.buildRequest('POST', '/_bulk', _bulkQueue.makeRequestBody());
-            _fn.elasticsearch.request(requestParams, _fn.elasticsearch.callback);
+            _fn.elasticsearch.request(requestParams, _fn.elasticsearch.bulkCallback);
+            _bulkQueue.clear();
         },
         createIndex: () => {
+            if (_config.action !== 'create') {
+                return;
+            }
+
             const indexName = _config.realIndex;
-            console.log('[createIndex] indexName : ', indexName, ', mappingFile : ', _configFileName);
+            console.log('[createIndex] : start, indexName : ', indexName, ', mappingFile : ', _configFileName);
         
             // do create index;
             const indexScheme = {};
-            indexScheme.settings = _config.indexSettings;
-            indexScheme.mappings = _config.indexMappings;
+            indexScheme.settings = _elasticsearch[_config.profile].indexSettings.settings;
+            indexScheme.mappings = _config.indexMappings.mappings;
 
             const requestParams = _fn.elasticsearch.buildRequest('PUT', _config.realIndex, JSON.stringify(indexScheme));
-            _fn.elasticsearch.request(requestParams, _fn.elasticsearch.callback);
+            _fn.elasticsearch.request(requestParams, _fn.elasticsearch.bulkCallback);
 
         },
         rebindAlias: () => {
+            if (_config.action !== 'create') {
+                return;
+            }
+
             const aliasName = _config.index;
             const indexName = _config.realIndex;
         
-            console.log('[rebindAlias] indexName : ', indexName, ', read aliasName : ', aliasName);
+            console.log('[rebindAlias] start, indexName : ', indexName, ', read aliasName : ', aliasName);
 
             // do rebind alias; 
             const command = {
@@ -237,7 +301,9 @@ const _fn = {
             };
 
             const requestParams = _fn.elasticsearch.buildRequest('POST', '_alias', JSON.stringify(command));
-            _fn.elasticsearch.request(requestParams, _fn.elasticsearch.callback);
+            _fn.elasticsearch.request(requestParams, _fn.elasticsearch.bulkCallback);
+
+            console.log('[rebindAlias] end');
         },
         buildRequest: (method, path, requestBody) => {
             const datetime = (new Date()).toISOString().replace(/[:\-]|\.\d{3}/g, '');
@@ -304,38 +370,13 @@ const _fn = {
             }
 
             const request = _https.request(requestParams, (response) => {
-                let responseBody = '';
+                const responseBody = [];
                 response.on('data', (chunk) => {
-                    responseBody += chunk;
+                    responseBody.push(chunk);
                 });
         
                 response.on('end', () => {
-                    let info = {};
-                    try {
-                        info = JSON.parse(responseBody);
-                    } catch(error) {}
                     
-                    let failedItems;
-                    let success;
-                    let error;
-                    
-                    if (response.statusCode >= 200 && response.statusCode < 299) {
-                        if (isBulkIndexing) { 
-                            failedItems = info.items.filter((x) => {
-                                return x.index.status >= 300;
-                            });
-            
-                            success = { 
-                                'attemptedItems': info.items.length,
-                                'successfulItems': info.items.length - failedItems.length,
-                                'failedItems': failedItems.length
-                            };
-                        } else {
-                            success = {
-                                'response': info
-                            }; 
-                        }
-                    }
         
                     if (response.statusCode !== 200 || info.errors === true) {
                         // prevents logging of failed entries, but allows logging 
@@ -347,34 +388,31 @@ const _fn = {
                         };
                     }
         
-                    callback(error, success, response.statusCode, failedItems);
+                    callback(
+                        {
+                            statusCode: response.statusCode,
+                            body: responseBod.join(''),
+                            error: false
+                        }
+                    );
                 });
             }).on('error', (e) => {
-                callback(e);
+                callback(
+                    {
+                        statusCode: 0,
+                        body: '',
+                        error: e
+                    }
+                );
             });
             request.end(requestParams.body);    
         },
-        callback: (error, success, statusCode, failedItems) => {
-            console.log('Response: ' + JSON.stringify({ 
-                "statusCode": statusCode 
-            }));
-
+        bulkCallback: (response) => {
             if (error) {
-                _fn.elasticsearch.logFailure(error, failedItems);
-                // _context.fail(JSON.stringify(error));
-            } else {
-                console.log('Success: ' + JSON.stringify(success));
+                console.error(JSON.stringify(response));
             }
-        },
-        logFailure: (error, failedItems) => {
-            console.log('Error: ' + JSON.stringify(error, null, 2));
-    
-            if (failedItems && failedItems.length > 0) {
-                console.log("Failed Items: " +
-                    JSON.stringify(failedItems, null, 2));
-            }
-
-            throw new Error(error);
+            
+            throw new Error('bulk fail');
         }
     },
     crypto: {
@@ -387,75 +425,13 @@ const _fn = {
     }
 }
 
-exports.handler = async (event, context) => {
+exports.handler = (event, context) => {
     console.log('Received event: ', JSON.stringify(event, null, 2));
-    _context = context;
 
-    try {
-        await _fn.config.init(event);
-
-        if (_config.action === 'create') {
-            _fn.elasticsearch.createIndex();
-            readFileAndBulkIndex();
-            _fn.elasticsearch.rebindAlias();
-        } else if (_config.action === 'update') {
-            readFileAndBulkIndex();
-        } else {
-            throw new Error('action is not create | update')
+    _fn.config.init(event)
+    .then(
+        () => {
+            _fn.indexing.excuteIndexing(context);
         }
-    } catch(error) {
-        console.error(error);
-        _context.fail(JSON.stringify(error));
-    }
-
-    console.log('Success indexing : ', _config.realIndex, ', action : ', _config.action);
-    _context.succeed('Success');
+    );
 };
-
-function readFileAndBulkIndex() {
-    if (!_usable.s3) {
-        return;
-    }
-
-    const lineStream = new _LineStream();
-    // A stream of log records, from parsing each log line
-    const documentStream = new _stream.Transform({objectMode: true});
-    documentStream._transform = (line, encoding, done) => {
-        const documentRecord = _parse(line.toString());
-        const serializedRecord = JSON.stringify(documentRecord);
-        this.push(serializedRecord);
-        _totalDocumentsCount ++;
-        done();
-    }    
-
-    const params = {
-        Bucket: _config.s3Bucket, 
-        Key: _config.s3Key
-    };
-
-    console.log('[readFileAndBulkIndex]', JSON.stringify(params));
-
-    const s3Stream = _s3.getObject(params).createReadStream();
-
-    s3Stream
-    .pipe(lineStream)
-    .pipe(documentStream)
-        .on('data', (record) => {
-            console.log('[readFileAndBulkIndex]', record);
-        // if (!_fn.indexing.bulk(record)) {
-        //     return;
-        // }
-
-    })
-    .on('error', () => {
-        console.log(
-        'Error getting object "' + _config.s3Key + '" from bucket "' + _config.s3Bucket + '".  ' +
-        'Make sure they exist and your bucket is in the same region as this function.');
-        }
-    )
-    .on('close', () => {
-        console.log('[readFileAndBulkIndex]close');
-    });
-
-      
-}
