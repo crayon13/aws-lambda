@@ -3,6 +3,13 @@ import json
 import requests
 from requests_aws4auth import AWS4Auth
 
+_configFileName = 'config.json'
+
+_usable = {
+    's3': False,
+    'elasticsearch': False
+}
+
 _elasticsearch = {
     'devel': {
         'endpoint': 'my-search-endpoint.amazonaws.com',
@@ -28,26 +35,13 @@ _elasticsearch = {
     'headers': {'Content-Type': 'application/x-ndjson; charset=utf-8'}
 }
 
-_s3Client = boto3.client('s3')
-_credentials = boto3.Session().get_credentials()
-_awsauth = AWS4Auth(_credentials.access_key
-, _credentials.secret_key, _elasticsearch['region'], _elasticsearch['service']
-, session_token=_credentials.token)
-
-_configFileName = 'config.json'
-
-_usable = {
-    's3': False,
-    'elasticsearch': False
-}
-
 _bulkQueue = {
     'queue': [],
     'maxQueuSize': 1000
 }
 
 _configValues = {
-    'fromS3Key': ['root', 'index', 'profile', 'fileName'],
+    'fromS3Key': ['root', 'alias', 'profile', 'fileName'],
     'fromFileName': ['dataTime', 'action']
 }
 
@@ -59,7 +53,7 @@ _config = {
     'indexFieldNames': [], 
     'root': '',
     'path': '',
-    'index': '',
+    'alias': '',
     'realIndex': '',
     'profile': '',
     'fileName': '',
@@ -67,21 +61,36 @@ _config = {
     'action': ''    
 }
 
+_s3Client = boto3.client('s3')
+_credentials = boto3.Session().get_credentials()
+_awsauth = AWS4Auth(_credentials.access_key
+, _credentials.secret_key, _elasticsearch['region'], _elasticsearch['service']
+, session_token=_credentials.token)
+
+def lambda_handler(event, context):
+    initConfig(event)
+    createIndex()
+    bulk()
+    rebindAlias()
+
+###########################################################################
 def log(messge = ''):
     print('[INFO]', messge)
+
 
 def setValue(dictionary = [], key = '', value = ''):
     if key in dictionary:
         dictionary[key] = value
     else:
-        return dictionary[key]
+        dictionary[key]
         
+
 def setConfigFromFile(configKeys = []):
     filePath = _config['path'] + _configFileName
     log(_config['s3Bucket'] + ':' + filePath)
 
     configByFile = {}
-    if (_usable['s3']):
+    if _usable['s3']:
         # S3에서 파일을 읽어오는 것으로 
         s3Object = _s3Client.get_object(Bucket=_config['s3Bucket'], Key=filePath)
         jsonString = s3Object["Body"].read().decode('utf-8')
@@ -116,10 +125,10 @@ def initConfig(event = {}):
 
     # set real index name
     indexSuffx = ''
-    if _config['action'] == 'create':
+    if (_config['action'] == 'create'):
         indexSuffx = '-' + _config['dataTime']
 
-    setValue(_config, 'realIndex', _config['index'] + indexSuffx)
+    setValue(_config, 'realIndex', _config['alias'] + indexSuffx)
 
     # set Config From config.json
     setConfigFromFile(['indexMappings', 'fileFieldDelemeter'])
@@ -128,9 +137,7 @@ def initConfig(event = {}):
 
 
 def createIndex():
-    if (_config['action'] != 'create'):
-        return
-    
+    alias = _config['alias']
     indexName = _config['realIndex']
     log(f'[createIndex] : start, indexName : {indexName}')
 
@@ -138,12 +145,77 @@ def createIndex():
     indexScheme['settings'] = _elasticsearch[_config['profile']]['indexSettings']['settings']
     indexScheme['mappings'] = _config['indexMappings']['mappings']
 
-    if (_usable['elasticsearch'] == False):
+    if (_usable['elasticsearch'] == False or _config['action'] != 'create' or alias == indexName):
         log(json.dumps(indexScheme))
         return
 
     response = requests.put(indexName, auth=_awsauth, data=json.dumps(indexScheme), headers=_elasticsearch['headers'])
     response.raise_for_status()
+    return response.text
+
+
+def headerValidate(fileds = []):
+    properties = _config['indexMappings']['mappings']['properties']
+
+    for field in fileds:
+        properties[field]
+
+
+def fieldsValidate(fileds = []):
+    fieldsLength = len(fileds)
+    headersLength = len(_config['indexFieldNames'])
+
+    if (fieldsLength != headersLength):
+        raise Exception(f'[fieldsValidate] fieldCount Not Equals Headers, headersLength : {headersLength}, fieldsLength : {fieldsLength}')
+
+
+def isFullBulkQueue():
+    return _bulkQueue['maxQueuSize'] <= len(_bulkQueue['queue'])
+
+
+def isEmptyBulkQueue():
+    return len(_bulkQueue['queue']) == 0
+
+
+def addBulkQueue(dictionary):
+    _bulkQueue['queue'].append(json.dumps(dictionary))
+
+
+def makeBulkJsonAndAddQueue(fileds = []):
+    fieldsValidate(fileds)
+
+    id = fileds[0]
+    header = {'index': {'_index': _config['realIndex'], '_id': id}}
+    body = {}
+
+    for fieldSeq in range(0, len(fileds) - 1):
+        fieldName = _config['indexFieldNames'][fieldSeq]
+        body[fieldName] = fileds[fieldSeq]
+
+    addBulkQueue(header)
+    addBulkQueue(body)
+
+
+def makeRequestBodyByBulkQueueAndClear():
+    data = '\n'.join(_bulkQueue['queue']) + '\n'
+    _bulkQueue['queue'].clear()
+    return data
+
+
+def postForBulk():
+    if isEmptyBulkQueue():
+        return 'bulk queue is empty'
+
+    requestBody = makeRequestBodyByBulkQueueAndClear()
+    log(f'[postForBulk] {requestBody}')
+
+    if (_usable['elasticsearch'] == False):
+        return 'elasticsearch usable : False'
+
+    response = requests.post('_bulk', auth=_awsauth, data=requestBody, headers=_elasticsearch['headers'])
+    response.raise_for_status()    
+    return response.text
+
 
 def bulk():
     indexName = _config['realIndex']
@@ -155,29 +227,84 @@ def bulk():
     s3Object = _s3Client.get_object(Bucket=_config['s3Bucket'], Key=_config['s3Key'])
     recordLine = s3Object["Body"].read()
 
+    recordCount = 0
     for line in recordLine.splitlines():
+        recordCount = recordCount + 1
         record = line.decode('utf-8')
         log(record)
 
+        fields = record.split(_config['fileFieldDelemeter'])
 
+        if (recordCount == 1):
+            log('헤더를 만들어요.')
+            headerValidate(fields)
+            setValue(_config, 'indexFieldNames', fields)
+        else: 
+            log('큐에 담고 색인을 해요')
+            makeBulkJsonAndAddQueue(fields)
+
+            if isFullBulkQueue():
+                postForBulk()
+
+    postForBulk()
+
+
+def getAliasBindedIndex():
+    if (_usable['elasticsearch'] == False):
+        return ''
+
+    alias = _config['alias']
+
+    response = requests.get(f'_cat/aliases/{alias}?format=json', auth=_awsauth, headers=_elasticsearch['headers'])
+    response.raise_for_status()   
+
+    bindedIndices = json.loads(response.text)
+
+    if (len(bindedIndices) > 1):
+        raise Exception(f'{alias} is multi indices binded')
+    elif (len(bindedIndices) == 0):
+        return ''
     
+    return bindedIndices[0]['index']
 
-
-    return
 
 
 def rebindAlias():
+    alias = _config['alias']
     indexName = _config['realIndex']
-    log(f'[rebindAlias] : start, indexName : {indexName}')
-    
-    return
+    bindedIndexName = getAliasBindedIndex()
 
+    log(f'[rebindAlias] : start, alias : {alias}, bindedIndexName : {bindedIndexName}, indexName : {indexName}, ')
 
-def lambda_handler(event, context):
-    initConfig(event)
-    createIndex()
-    bulk()
-    rebindAlias()
+    requestBody = {
+        'actions': []
+    }
+
+    if (bindedIndexName != ''):
+        remove = {
+            'remove': {
+                'alias': alias,
+                'index': bindedIndexName
+            }
+        }
+        requestBody['actions'].append(remove)
+
+    add = {
+        'add': {
+            'alias': alias,
+            'index': indexName
+        }
+    }
+    requestBody['actions'].append(add)
+
+    if (_usable['elasticsearch'] == False or _config['action'] != 'create' or alias == indexName):
+        log(json.dumps(requestBody))
+        return ''    
+
+    response = requests.post('_aliases', auth=_awsauth, data=requestBody, headers=_elasticsearch['headers'])
+    response.raise_for_status()    
+    return response.text
+
 
 _event = {
   "Records": [
@@ -234,4 +361,4 @@ _fileConfig = {
     }
 }
 
-lambda_handler(_event, '')
+# lambda_handler(_event, '')
