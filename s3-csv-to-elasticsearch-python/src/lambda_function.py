@@ -188,7 +188,7 @@ def makeBulkJsonAndAddQueue(fileds = []):
     header = {'index': {'_index': _config['realIndex'], '_id': id}}
     body = {}
 
-    for fieldSeq in range(0, len(fileds) - 1):
+    for fieldSeq in range(len(fileds)):
         fieldName = _config['indexFieldNames'][fieldSeq]
         body[fieldName] = fileds[fieldSeq]
 
@@ -236,11 +236,9 @@ def bulk():
         fields = record.split(_config['fileFieldDelemeter'])
 
         if (recordCount == 1):
-            log('헤더를 만들어요.')
             headerValidate(fields)
             setValue(_config, 'indexFieldNames', fields)
         else: 
-            log('큐에 담고 색인을 해요')
             makeBulkJsonAndAddQueue(fields)
 
             if isFullBulkQueue():
