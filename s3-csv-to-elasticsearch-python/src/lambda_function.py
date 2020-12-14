@@ -6,8 +6,8 @@ from requests_aws4auth import AWS4Auth
 _configFileName = 'config.json'
 
 _usable = {
-    's3': False,
-    'elasticsearch': False
+    's3': True,
+    'elasticsearch': True
 }
 
 _elasticsearch = {
@@ -94,7 +94,6 @@ def setConfigFromFile(configKeys = []):
         # S3에서 파일을 읽어오는 것으로 
         s3Object = _s3Client.get_object(Bucket=_config['s3Bucket'], Key=filePath)
         jsonString = s3Object["Body"].read().decode('utf-8')
-        log(jsonString)
         configByFile = json.loads(jsonString)
     else:
         configByFile = _fileConfig
@@ -158,6 +157,7 @@ def createIndex():
         return
 
     response = requests.put(makeElasticsearchUrl(indexName), auth=_awsauth, data=json.dumps(indexScheme), headers=_elasticsearch['headers'])
+    log('[createIndex] ' + response.text)
     response.raise_for_status()
     return response.text
 
@@ -262,6 +262,7 @@ def getAliasBindedIndex():
     alias = _config['alias']
 
     response = requests.get(makeElasticsearchUrl(f'_cat/aliases/{alias}?format=json'), auth=_awsauth, headers=_elasticsearch['headers'])
+    log('[getAliasBindedIndex] ' + response.text)
     response.raise_for_status()   
 
     bindedIndices = json.loads(response.text)
@@ -308,6 +309,7 @@ def rebindAlias():
         return ''    
 
     response = requests.post(makeElasticsearchUrl('_aliases'), auth=_awsauth, data=requestBody, headers=_elasticsearch['headers'])
+    log('[rebindAlias] ' + response.text)
     response.raise_for_status()    
     return response.text
 
