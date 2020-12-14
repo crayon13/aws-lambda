@@ -12,7 +12,7 @@ _usable = {
 
 _elasticsearch = {
     'devel': {
-        'endpoint': 'my-search-endpoint.amazonaws.com',
+        'endpoint': 'https://search-musinsa-es-drmgnroc6jq6ibirp7lrkw65mm.ap-northeast-2.es.amazonaws.com',
         'indexSettings': {
             'settings': {
                 'number_of_shards': 1,
@@ -136,6 +136,14 @@ def initConfig(event = {}):
     log(_config)
 
 
+def makeElasticsearchUrl(path = ''):
+    profile = _config['profile']
+    endPoint = _elasticsearch[profile]['endpoint']
+
+    return f'{endPoint}/{path}'
+
+
+
 def createIndex():
     alias = _config['alias']
     indexName = _config['realIndex']
@@ -149,7 +157,7 @@ def createIndex():
         log(json.dumps(indexScheme))
         return
 
-    response = requests.put(indexName, auth=_awsauth, data=json.dumps(indexScheme), headers=_elasticsearch['headers'])
+    response = requests.put(makeElasticsearchUrl(indexName), auth=_awsauth, data=json.dumps(indexScheme), headers=_elasticsearch['headers'])
     response.raise_for_status()
     return response.text
 
@@ -212,7 +220,7 @@ def postForBulk():
     if (_usable['elasticsearch'] == False):
         return 'elasticsearch usable : False'
 
-    response = requests.post('_bulk', auth=_awsauth, data=requestBody, headers=_elasticsearch['headers'])
+    response = requests.post(makeElasticsearchUrl('_bulk'), auth=_awsauth, data=requestBody, headers=_elasticsearch['headers'])
     response.raise_for_status()    
     return response.text
 
@@ -253,7 +261,7 @@ def getAliasBindedIndex():
 
     alias = _config['alias']
 
-    response = requests.get(f'_cat/aliases/{alias}?format=json', auth=_awsauth, headers=_elasticsearch['headers'])
+    response = requests.get(makeElasticsearchUrl(f'_cat/aliases/{alias}?format=json'), auth=_awsauth, headers=_elasticsearch['headers'])
     response.raise_for_status()   
 
     bindedIndices = json.loads(response.text)
@@ -299,7 +307,7 @@ def rebindAlias():
         log(json.dumps(requestBody))
         return ''    
 
-    response = requests.post('_aliases', auth=_awsauth, data=requestBody, headers=_elasticsearch['headers'])
+    response = requests.post(makeElasticsearchUrl('_aliases'), auth=_awsauth, data=requestBody, headers=_elasticsearch['headers'])
     response.raise_for_status()    
     return response.text
 
