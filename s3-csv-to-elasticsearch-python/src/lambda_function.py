@@ -3,6 +3,9 @@ import json
 import requests
 from requests_aws4auth import AWS4Auth
 
+###########################################################################
+# variable
+###########################################################################
 _configFileName = 'config.json'
 
 _usable = {
@@ -12,7 +15,8 @@ _usable = {
 
 _elasticsearch = {
     'devel': {
-        'endpoint': 'https://search-musinsa-es-drmgnroc6jq6ibirp7lrkw65mm.ap-northeast-2.es.amazonaws.com',
+        'endpoint': 'https://search-musinsa-es-drmgnroc6jq6ibirp7lrkw65mm.ap-northeast-2.es.amazonaws.com/',
+        'Authorization': 'bXVzaW5zYTpNdXNpbnNhMCFAKQ==',
         'indexSettings': {
             'settings': {
                 'number_of_shards': 1,
@@ -21,7 +25,8 @@ _elasticsearch = {
         }   
     }, 
     'prod': {
-        'endpoint': 'my-search-endpoint.amazonaws.com',
+        'endpoint': 'https://my-search-endpoint.amazonaws.com/',
+        'Authorization': '',
         'indexSettings': {
             'settings': {
                 'number_of_shards': 1,
@@ -32,12 +37,17 @@ _elasticsearch = {
     'region': 'ap-northeast-2',
     'service': 'es',
     'doctype': '_doc',
-    'headers': {'Content-Type': 'application/x-ndjson; charset=utf-8'}
+    'headers': {
+        'Content-Type': 'application/x-ndjson; charset=utf-8', 
+        'Authorization': ''
+    }
 }
 
 _bulkQueue = {
     'queue': [],
-    'maxQueuSize': 1000
+    'maxQueuSize': 1000,
+    'addedDocumentCount': 0,
+    'totalDocumentCount': 0
 }
 
 _configValues = {
@@ -67,12 +77,18 @@ _awsauth = AWS4Auth(_credentials.access_key
 , _credentials.secret_key, _elasticsearch['region'], _elasticsearch['service']
 , session_token=_credentials.token)
 
+###########################################################################
+# Handler
+###########################################################################
 def lambda_handler(event, context):
     initConfig(event)
+    setElasticsearchRequestHeader()
     createIndex()
     bulk()
     rebindAlias()
 
+###########################################################################
+# function - common
 ###########################################################################
 def log(messge = ''):
     print('[INFO]', messge)
@@ -85,9 +101,12 @@ def setValue(dictionary = [], key = '', value = ''):
         dictionary[key]
         
 
+###########################################################################
+# function - config
+###########################################################################
 def setConfigFromFile(configKeys = []):
     filePath = _config['path'] + _configFileName
-    log(_config['s3Bucket'] + ':' + filePath)
+    log('[setConfigFromFile] ' + _config['s3Bucket'] + ':' + filePath)
 
     configByFile = {}
     if _usable['s3']:
@@ -96,7 +115,7 @@ def setConfigFromFile(configKeys = []):
         jsonString = s3Object["Body"].read().decode('utf-8')
         configByFile = json.loads(jsonString)
     else:
-        configByFile = _fileConfig
+        configByFile = _testFileConfig
 
     for key in configKeys:
         setValue(_config, key, configByFile[key])
@@ -132,36 +151,26 @@ def initConfig(event = {}):
     # set Config From config.json
     setConfigFromFile(['indexMappings', 'fileFieldDelemeter'])
 
-    log(_config)
+    log('[_config] ' + json.dumps(_config))
+
+
+def setElasticsearchRequestHeader():
+    profile = _config['profile']
+    authorizationValue = 'Basic ' + _elasticsearch[profile]['Authorization']
+    setValue(_elasticsearch['headers'], 'Authorization', authorizationValue)
+    log('[elasticsearchRequestHeader] ' + json.dumps(_elasticsearch['headers']))
 
 
 def makeElasticsearchUrl(path = ''):
     profile = _config['profile']
     endPoint = _elasticsearch[profile]['endpoint']
 
-    return f'{endPoint}/{path}'
+    return f'{endPoint}{path}'
 
 
-
-def createIndex():
-    alias = _config['alias']
-    indexName = _config['realIndex']
-    log(f'[createIndex] : start, indexName : {indexName}')
-
-    indexScheme = {}
-    indexScheme['settings'] = _elasticsearch[_config['profile']]['indexSettings']['settings']
-    indexScheme['mappings'] = _config['indexMappings']['mappings']
-
-    if (_usable['elasticsearch'] == False or _config['action'] != 'create' or alias == indexName):
-        log(json.dumps(indexScheme))
-        return
-
-    response = requests.put(makeElasticsearchUrl(indexName), auth=_awsauth, data=json.dumps(indexScheme), headers=_elasticsearch['headers'])
-    log('[createIndex] ' + response.text)
-    response.raise_for_status()
-    return response.text
-
-
+###########################################################################
+# function - csv file & bulk Queue
+###########################################################################
 def headerValidate(fileds = []):
     properties = _config['indexMappings']['mappings']['properties']
 
@@ -178,7 +187,7 @@ def fieldsValidate(fileds = []):
 
 
 def isFullBulkQueue():
-    return _bulkQueue['maxQueuSize'] <= len(_bulkQueue['queue'])
+    return _bulkQueue['maxQueuSize'] <= _bulkQueue['addedDocumentCount'] 
 
 
 def isEmptyBulkQueue():
@@ -187,6 +196,20 @@ def isEmptyBulkQueue():
 
 def addBulkQueue(dictionary):
     _bulkQueue['queue'].append(json.dumps(dictionary))
+
+
+def clearBulkQueue():
+    _bulkQueue['addedDocumentCount'] = 0
+    _bulkQueue['queue'].clear()
+
+
+def increaseAddedDocumentCount():
+    _bulkQueue['addedDocumentCount'] = _bulkQueue['addedDocumentCount'] + 1
+    increaseTotalDocumentCount()
+
+
+def increaseTotalDocumentCount():
+    _bulkQueue['totalDocumentCount'] = _bulkQueue['totalDocumentCount'] + 1
 
 
 def makeBulkJsonAndAddQueue(fileds = []):
@@ -202,12 +225,39 @@ def makeBulkJsonAndAddQueue(fileds = []):
 
     addBulkQueue(header)
     addBulkQueue(body)
+    increaseAddedDocumentCount()
 
 
 def makeRequestBodyByBulkQueueAndClear():
+    totalDocumentCount = _bulkQueue['totalDocumentCount']
+    log(f'[totalDocumentCount] {totalDocumentCount}')
+    
     data = '\n'.join(_bulkQueue['queue']) + '\n'
-    _bulkQueue['queue'].clear()
+    clearBulkQueue()
     return data
+
+
+###########################################################################
+# function - Elasticsearch
+###########################################################################
+def createIndex():
+    alias = _config['alias']
+    indexName = _config['realIndex']
+    log(f'[createIndex] : start, indexName : {indexName}')
+
+    indexScheme = {}
+    indexScheme['settings'] = _elasticsearch[_config['profile']]['indexSettings']['settings']
+    indexScheme['mappings'] = _config['indexMappings']['mappings']
+
+    if (_usable['elasticsearch'] == False or _config['action'] != 'create' or alias == indexName):
+        log(json.dumps(indexScheme))
+        return
+
+    # response = requests.put(makeElasticsearchUrl(indexName), auth=_awsauth, data=json.dumps(indexScheme), headers=_elasticsearch['headers'])
+    response = requests.put(makeElasticsearchUrl(indexName), data=json.dumps(indexScheme), headers=_elasticsearch['headers'])
+    log('[createIndex] ' + response.text)
+    response.raise_for_status()
+    return response.text
 
 
 def postForBulk():
@@ -215,12 +265,12 @@ def postForBulk():
         return 'bulk queue is empty'
 
     requestBody = makeRequestBodyByBulkQueueAndClear()
-    log(f'[postForBulk] {requestBody}')
 
     if (_usable['elasticsearch'] == False):
         return 'elasticsearch usable : False'
 
-    response = requests.post(makeElasticsearchUrl('_bulk'), auth=_awsauth, data=requestBody, headers=_elasticsearch['headers'])
+    # response = requests.post(makeElasticsearchUrl('_bulk'), auth=_awsauth, data=requestBody, headers=_elasticsearch['headers'])
+    response = requests.post(makeElasticsearchUrl('_bulk'), data=requestBody, headers=_elasticsearch['headers'])
     response.raise_for_status()    
     return response.text
 
@@ -239,7 +289,6 @@ def bulk():
     for line in recordLine.splitlines():
         recordCount = recordCount + 1
         record = line.decode('utf-8')
-        log(record)
 
         fields = record.split(_config['fileFieldDelemeter'])
 
@@ -261,7 +310,8 @@ def getAliasBindedIndex():
 
     alias = _config['alias']
 
-    response = requests.get(makeElasticsearchUrl(f'_cat/aliases/{alias}?format=json'), auth=_awsauth, headers=_elasticsearch['headers'])
+    # response = requests.get(makeElasticsearchUrl(f'_cat/aliases/{alias}?format=json'), auth=_awsauth, headers=_elasticsearch['headers'])
+    response = requests.get(makeElasticsearchUrl(f'_cat/aliases/{alias}?format=json'), headers=_elasticsearch['headers'])
     log('[getAliasBindedIndex] ' + response.text)
     response.raise_for_status()   
 
@@ -273,7 +323,6 @@ def getAliasBindedIndex():
         return ''
     
     return bindedIndices[0]['index']
-
 
 
 def rebindAlias():
@@ -304,56 +353,61 @@ def rebindAlias():
     }
     requestBody['actions'].append(add)
 
+    log('rebindAlias ' + json.dumps(requestBody))
+
     if (_usable['elasticsearch'] == False or _config['action'] != 'create' or alias == indexName):
-        log(json.dumps(requestBody))
         return ''    
 
-    response = requests.post(makeElasticsearchUrl('_aliases'), auth=_awsauth, data=requestBody, headers=_elasticsearch['headers'])
+    # response = requests.post(makeElasticsearchUrl('_aliases'), auth=_awsauth, data=requestBody, headers=_elasticsearch['headers'])
+    response = requests.post(makeElasticsearchUrl('_aliases'), data=json.dumps(requestBody), headers=_elasticsearch['headers'])
     log('[rebindAlias] ' + response.text)
     response.raise_for_status()    
     return response.text
 
 
-_event = {
-  "Records": [
-    {
-      "eventVersion": "2.0",
-      "eventSource": "aws:s3",
-      "awsRegion": "ap-northeast-2",
-      "eventTime": "1970-01-01T00:00:00.000Z",
-      "eventName": "ObjectCreated:Put",
-      "userIdentity": {
-        "principalId": "EXAMPLE"
-      },
-      "requestParameters": {
-        "sourceIPAddress": "127.0.0.1"
-      },
-      "responseElements": {
-        "x-amz-request-id": "EXAMPLE123456789",
-        "x-amz-id-2": "EXAMPLE123/5678abcdefghijklambdaisawesome/mnopqrstuvwxyzABCDEFGH"
-      },
-      "s3": {
-        "s3SchemaVersion": "1.0",
-        "configurationId": "testConfigRule",
-        "bucket": {
-          "name": "musinsa-search",
-          "ownerIdentity": {
-            "principalId": "EXAMPLE"
-          },
-          "arn": "arn:aws:s3:::musinsa-search"
-        },
-        "object": {
-          "key": "service-cluster-data/crayon13/devel/20201201000000.create.csv",
-          "size": 1024,
-          "eTag": "0123456789abcdef0123456789abcdef",
-          "sequencer": "0A1B2C3D4E5F678901"
-        }
-      }
-    }
-  ]
-}
+###########################################################################
+# test - local
+###########################################################################
+# _event = {
+#   "Records": [
+#     {
+#       "eventVersion": "2.0",
+#       "eventSource": "aws:s3",
+#       "awsRegion": "ap-northeast-2",
+#       "eventTime": "1970-01-01T00:00:00.000Z",
+#       "eventName": "ObjectCreated:Put",
+#       "userIdentity": {
+#         "principalId": "EXAMPLE"
+#       },
+#       "requestParameters": {
+#         "sourceIPAddress": "127.0.0.1"
+#       },
+#       "responseElements": {
+#         "x-amz-request-id": "EXAMPLE123456789",
+#         "x-amz-id-2": "EXAMPLE123/5678abcdefghijklambdaisawesome/mnopqrstuvwxyzABCDEFGH"
+#       },
+#       "s3": {
+#         "s3SchemaVersion": "1.0",
+#         "configurationId": "testConfigRule",
+#         "bucket": {
+#           "name": "musinsa-search",
+#           "ownerIdentity": {
+#             "principalId": "EXAMPLE"
+#           },
+#           "arn": "arn:aws:s3:::musinsa-search"
+#         },
+#         "object": {
+#           "key": "service-cluster-data/crayon13/devel/20201201000000.create.csv",
+#           "size": 1024,
+#           "eTag": "0123456789abcdef0123456789abcdef",
+#           "sequencer": "0A1B2C3D4E5F678901"
+#         }
+#       }
+#     }
+#   ]
+# }
 
-_fileConfig = {
+_testFileConfig = {
     "fileFieldDelemeter": ",", 
     "indexMappings" :{
         "mappings": {

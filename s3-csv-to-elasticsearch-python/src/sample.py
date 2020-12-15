@@ -33,10 +33,11 @@ def lambda_handler(event, context):
     }
 
     # ES 6.x requires an explicit Content-Type header
-    headers = { "Content-Type": "application/json" }
+    headers = { "Content-Type": "application/json", "Authorization": "Basic bXVzaW5zYTpNdXNpbnNhMCFAKQ=="}
 
     # Make the signed HTTP request
-    r = requests.put(url, auth=awsauth, headers=headers, data=json.dumps(query))
+    # r = requests.put(url,  headers=headers, data=json.dumps(query))
+    r = requests.get(url,  headers=headers)
 
     # Create the response and add some extra content to support CORS
     response = {
@@ -48,5 +49,5 @@ def lambda_handler(event, context):
     }
 
     # Add the search results to the response
-    response['body'] = r.text
+    response['body'] = json.loads(r.text)
     return response
