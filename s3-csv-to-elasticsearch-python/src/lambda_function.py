@@ -68,7 +68,8 @@ _config = {
     'profile': '',
     'fileName': '',
     'dataTime': '', 
-    'action': ''    
+    'action': '',
+    'notDeleteIndicies': []   
 }
 
 _s3Client = boto3.client('s3')
@@ -86,6 +87,7 @@ def lambda_handler(event, context):
     createIndex()
     bulk()
     rebindAlias()
+    deleteOldIndcies()
 
 ###########################################################################
 # function - common
@@ -99,6 +101,10 @@ def setValue(dictionary = [], key = '', value = ''):
         dictionary[key] = value
     else:
         dictionary[key]
+
+
+def isNotCreateIndex(): 
+    return 
         
 
 ###########################################################################
@@ -164,7 +170,6 @@ def setElasticsearchRequestHeader():
 def makeElasticsearchUrl(path = ''):
     profile = _config['profile']
     endPoint = _elasticsearch[profile]['endpoint']
-
     return f'{endPoint}{path}'
 
 
@@ -204,12 +209,12 @@ def clearBulkQueue():
 
 
 def increaseAddedDocumentCount():
-    _bulkQueue['addedDocumentCount'] = _bulkQueue['addedDocumentCount'] + 1
+    setValue(_bulkQueue, 'addedDocumentCount', _bulkQueue['addedDocumentCount'] + 1)
     increaseTotalDocumentCount()
 
 
 def increaseTotalDocumentCount():
-    _bulkQueue['totalDocumentCount'] = _bulkQueue['totalDocumentCount'] + 1
+    setValue(_bulkQueue, 'totalDocumentCount', _bulkQueue['totalDocumentCount'] + 1)
 
 
 def makeBulkJsonAndAddQueue(fileds = []):
@@ -231,7 +236,7 @@ def makeBulkJsonAndAddQueue(fileds = []):
 def makeRequestBodyByBulkQueueAndClear():
     totalDocumentCount = _bulkQueue['totalDocumentCount']
     log(f'[totalDocumentCount] {totalDocumentCount}')
-    
+
     data = '\n'.join(_bulkQueue['queue']) + '\n'
     clearBulkQueue()
     return data
@@ -249,13 +254,14 @@ def createIndex():
     indexScheme['settings'] = _elasticsearch[_config['profile']]['indexSettings']['settings']
     indexScheme['mappings'] = _config['indexMappings']['mappings']
 
-    if (_usable['elasticsearch'] == False or _config['action'] != 'create' or alias == indexName):
+    if (isNotCreateIndex() or alias == indexName):
         log(json.dumps(indexScheme))
         return
 
-    # response = requests.put(makeElasticsearchUrl(indexName), auth=_awsauth, data=json.dumps(indexScheme), headers=_elasticsearch['headers'])
-    response = requests.put(makeElasticsearchUrl(indexName), data=json.dumps(indexScheme), headers=_elasticsearch['headers'])
-    log('[createIndex] ' + response.text)
+    url = makeElasticsearchUrl(indexName)
+    # response = requests.put(url, data=json.dumps(indexScheme), headers=_elasticsearch['headers'], auth=_awsauth)
+    response = requests.put(url, data=json.dumps(indexScheme), headers=_elasticsearch['headers'])
+    log(f'[createIndex] {url}, ' + response.text)
     response.raise_for_status()
     return response.text
 
@@ -269,7 +275,7 @@ def postForBulk():
     if (_usable['elasticsearch'] == False):
         return 'elasticsearch usable : False'
 
-    # response = requests.post(makeElasticsearchUrl('_bulk'), auth=_awsauth, data=requestBody, headers=_elasticsearch['headers'])
+    # response = requests.post(makeElasticsearchUrl('_bulk'), data=requestBody, headers=_elasticsearch['headers'], auth=_awsauth)
     response = requests.post(makeElasticsearchUrl('_bulk'), data=requestBody, headers=_elasticsearch['headers'])
     response.raise_for_status()    
     return response.text
@@ -310,9 +316,10 @@ def getAliasBindedIndex():
 
     alias = _config['alias']
 
-    # response = requests.get(makeElasticsearchUrl(f'_cat/aliases/{alias}?format=json'), auth=_awsauth, headers=_elasticsearch['headers'])
-    response = requests.get(makeElasticsearchUrl(f'_cat/aliases/{alias}?format=json'), headers=_elasticsearch['headers'])
-    log('[getAliasBindedIndex] ' + response.text)
+    url = makeElasticsearchUrl(f'_cat/aliases/{alias}?format=json')
+    # response = requests.get(url, headers=_elasticsearch['headers'], auth=_awsauth)
+    response = requests.get(url, headers=_elasticsearch['headers'])
+    log(f'[getAliasBindedIndex] {url}, ' + response.text)
     response.raise_for_status()   
 
     bindedIndices = json.loads(response.text)
@@ -325,10 +332,16 @@ def getAliasBindedIndex():
     return bindedIndices[0]['index']
 
 
+def setNotDeleteIndicies(indices = []):
+    setValue(_config, 'notDeleteIndicies', indices)
+
+
 def rebindAlias():
     alias = _config['alias']
     indexName = _config['realIndex']
     bindedIndexName = getAliasBindedIndex()
+
+    setNotDeleteIndicies([indexName, bindedIndexName])
 
     log(f'[rebindAlias] : start, alias : {alias}, bindedIndexName : {bindedIndexName}, indexName : {indexName}, ')
 
@@ -351,18 +364,57 @@ def rebindAlias():
             'index': indexName
         }
     }
+    
     requestBody['actions'].append(add)
 
     log('rebindAlias ' + json.dumps(requestBody))
 
-    if (_usable['elasticsearch'] == False or _config['action'] != 'create' or alias == indexName):
+    if (isNotCreateIndex() or alias == indexName):
         return ''    
 
-    # response = requests.post(makeElasticsearchUrl('_aliases'), auth=_awsauth, data=requestBody, headers=_elasticsearch['headers'])
-    response = requests.post(makeElasticsearchUrl('_aliases'), data=json.dumps(requestBody), headers=_elasticsearch['headers'])
-    log('[rebindAlias] ' + response.text)
+    url = makeElasticsearchUrl('_aliases')
+    # response = requests.post(url, data=json.dumps(requestBody), headers=_elasticsearch['headers'], auth=_awsauth)
+    response = requests.post(url, data=json.dumps(requestBody), headers=_elasticsearch['headers'])
+    log(f'[rebindAlias] {url}, ' + response.text)
     response.raise_for_status()    
     return response.text
+
+
+def deleteOldIndcies():
+    alias = _config['alias']
+    notDeleteIndicies = _config['notDeleteIndicies']
+
+    notDeleteIndiciesCount = 0
+
+    for index in notDeleteIndicies:
+        if (index != ''):
+            notDeleteIndiciesCount = notDeleteIndiciesCount + 1
+
+    if (isNotCreateIndex() or notDeleteIndiciesCount == 0):
+        return
+
+    url = makeElasticsearchUrl(f'_cat/indices/{alias}-20*?format=json')
+    # response = requests.get(url, headers=_elasticsearch['headers'], auth=_awsauth)
+    response = requests.get(url, headers=_elasticsearch['headers'])
+    log(f'[deleteOldIndcies] indicies {url}: ' + response.text)
+    response.raise_for_status()   
+
+    indicies = json.loads(response.text)
+
+    if (len(indicies) == 0):
+        return
+
+    deleteIndicies = [index['index'] for index in indicies if index['index'] not in notDeleteIndicies]
+
+    if (len(deleteIndicies) == 0):
+        return
+
+    url = makeElasticsearchUrl(','.join(deleteIndicies))
+    #response = requests.delete(url, headers=_elasticsearch['headers'], auth=_awsauth)
+    response = requests.delete(url, headers=_elasticsearch['headers'])
+    log(f'[deleteOldIndcies] delete idicies : {url}, ' + response.text)
+    response.raise_for_status() 
+    return response.text  
 
 
 ###########################################################################
