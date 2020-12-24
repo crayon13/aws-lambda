@@ -15,8 +15,8 @@ _usable = {
 
 _elasticsearch = {
     'devel': {
-        'endpoint': 'https://search-musinsa-es-drmgnroc6jq6ibirp7lrkw65mm.ap-northeast-2.es.amazonaws.com/',
-        'Authorization': 'bXVzaW5zYTpNdXNpbnNhMCFAKQ==',
+        'endpoint': 'https://my-search-endpoint.amazonaws.com/',
+        'Authorization': 'base64(id:password)',
         'indexSettings': {
             'settings': {
                 'number_of_shards': 1,
@@ -26,7 +26,7 @@ _elasticsearch = {
     }, 
     'prod': {
         'endpoint': 'https://my-search-endpoint.amazonaws.com/',
-        'Authorization': '',
+        'Authorization': 'base64(id:password)',
         'indexSettings': {
             'settings': {
                 'number_of_shards': 1,
@@ -104,8 +104,8 @@ def setValue(dictionary = [], key = '', value = ''):
 
 
 def isNotCreateIndex(): 
-    return 
-        
+    return (_config['action'] != 'create')
+    
 
 ###########################################################################
 # function - config
