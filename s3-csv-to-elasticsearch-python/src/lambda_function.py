@@ -248,7 +248,6 @@ def makeRequestBodyByBulkQueueAndClear():
 def createIndex():
     alias = _config['alias']
     indexName = _config['realIndex']
-    log(f'[createIndex] : start, indexName : {indexName}')
 
     indexScheme = {}
     indexScheme['settings'] = _elasticsearch[_config['profile']]['indexSettings']['settings']
@@ -257,6 +256,8 @@ def createIndex():
     if (isNotCreateIndex() or alias == indexName):
         log(json.dumps(indexScheme))
         return
+
+    log(f'[createIndex] : start, indexName : {indexName}')
 
     url = makeElasticsearchUrl(indexName)
     # response = requests.put(url, data=json.dumps(indexScheme), headers=_elasticsearch['headers'], auth=_awsauth)
@@ -341,9 +342,12 @@ def rebindAlias():
     indexName = _config['realIndex']
     bindedIndexName = getAliasBindedIndex()
 
-    setNotDeleteIndicies([indexName, bindedIndexName])
+    if (isNotCreateIndex() or alias == indexName):
+        return ''       
 
-    log(f'[rebindAlias] : start, alias : {alias}, bindedIndexName : {bindedIndexName}, indexName : {indexName}, ')
+    log(f'[rebindAlias] : start, alias : {alias}, bindedIndexName : {bindedIndexName}, indexName : {indexName}, ')        
+
+    setNotDeleteIndicies([indexName, bindedIndexName])
 
     requestBody = {
         'actions': []
@@ -367,10 +371,7 @@ def rebindAlias():
     
     requestBody['actions'].append(add)
 
-    log('rebindAlias ' + json.dumps(requestBody))
-
-    if (isNotCreateIndex() or alias == indexName):
-        return ''    
+    log('rebindAlias ' + json.dumps(requestBody)) 
 
     url = makeElasticsearchUrl('_aliases')
     # response = requests.post(url, data=json.dumps(requestBody), headers=_elasticsearch['headers'], auth=_awsauth)
