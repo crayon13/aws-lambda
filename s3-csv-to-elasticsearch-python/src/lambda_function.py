@@ -59,7 +59,7 @@ _config = {
     's3Bucket': '',
     's3Key': '', 
     'indexMappings': {},
-    'fileFieldDelemeter': '',
+    'fileFieldDelimiter': '',
     'indexFieldNames': [], 
     'root': '',
     'path': '',
@@ -155,7 +155,7 @@ def initConfig(event = {}):
     setValue(_config, 'realIndex', _config['alias'] + indexSuffx)
 
     # set Config From config.json
-    setConfigFromFile(['indexMappings', 'fileFieldDelemeter'])
+    setConfigFromFile(['indexMappings', 'fileFieldDelimiter'])
 
     log('[_config] ' + json.dumps(_config))
 
@@ -297,7 +297,7 @@ def bulk():
         recordCount = recordCount + 1
         record = line.decode('utf-8')
 
-        fields = record.split(_config['fileFieldDelemeter'])
+        fields = record.split(_config['fileFieldDelimiter'])
 
         if (recordCount == 1):
             headerValidate(fields)
@@ -461,7 +461,7 @@ def deleteOldIndcies():
 # }
 
 _testFileConfig = {
-    "fileFieldDelemeter": ",", 
+    "fileFieldDelimiter": ",", 
     "indexMappings" :{
         "mappings": {
             "properties": {
