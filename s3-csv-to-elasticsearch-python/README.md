@@ -25,21 +25,42 @@ s3://my-elasticsearch/indices/user/devel
 3. config.json
 ```
 {
-    "fileFieldDelemeter": ",", 
-    "indexMappings" :{
-        "mappings": {
-            "properties": {
-                "no": {
-                    "type": "keyword"
-                },
-                "nickname": {
-                    "type": "keyword"
-                }
-            }
-        }
+  "fileFieldDelimiter": ",",
+  "fieldArrayDelimiter": "",
+  "slack": {
+    "webhookUrl": "",
+    "channel": "",
+    "create": {
+      "start": "enable",
+      "finish": "enable",
+      "count": "enable",
+      "error": "enable"
+    },
+    "update": {
+      "start": "enable",
+      "finish": "enable",
+      "count": "enable",
+      "error": "enable"
     }
+  },
+  "indexMappings": {
+    "mappings": {
+      "properties": {
+        "no": {
+          "type": "keyword"
+        },
+        "nickname": {
+          "type": "keyword"
+        }
+      }
+    }
+  }
 }
 ```
-fileFieldDelemeter : csv file filed delemeter
+fileFieldDelimiter : csv file filed delimiter
+fieldArrayDelimiter : csv file filed value to array delimiter
+slack : slack alarm settings
+ * create : full indexing event alarm settings
+ * update : increment indexing event alarm settings
 indexMappings : elsticsearch index mapping 
 
