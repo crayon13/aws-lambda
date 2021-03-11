@@ -85,10 +85,11 @@ _config = {
 _backupPath = '/backup-index-data-files'
 
 _s3Client = boto3.client('s3')
-_credentials = boto3.Session().get_credentials()
-_awsauth = AWS4Auth(_credentials.access_key
-                    , _credentials.secret_key, _elasticsearch['region'], _elasticsearch['service']
-                    , session_token=_credentials.token)
+# Basic Auth 사용으로 요건 필요 없을 듯....
+# _credentials = boto3.Session().get_credentials()
+# _awsauth = AWS4Auth(_credentials.access_key
+#                     , _credentials.secret_key, _elasticsearch['region'], _elasticsearch['service']
+#                     , session_token=_credentials.token)
 
 ###########################################################################
 # Handler
